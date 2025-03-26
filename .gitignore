@@ -1,0 +1,20 @@
+# History files
+.Rhistory
+.Rapp.history
+
+# Session Data files
+.RData
+
+# RStudio files
+.Rproj.user/
+
+# data
+data/
+
+# key file
+key.R
+
+# report .docx
+*.docx
+
+reports/Figures/

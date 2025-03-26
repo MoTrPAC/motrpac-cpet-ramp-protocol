@@ -1,0 +1,226 @@
+---
+title: "Summary of Development Data"
+output: 
+  officedown::rdocx_document:
+    reference_docx: style_manuscript_times_new_roman.docx
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning= FALSE, 
+                      message = FALSE)
+library(RODBC)
+library(here)
+library(tidyverse)
+library(gtsummary)
+library(labelled)
+library(flextable)
+
+source(file.path(here(), "key.R"))
+lapply(list.files(file.path(here(), "R"), full.names = TRUE), source)
+
+# Figure options
+theme_set(theme_bw())
+theme_update(panel.grid = element_blank())
+```
+
+
+```{r, data}
+
+# Using frozen data from 09/13/2024 data transfer
+motrpac <- odbcConnect(dsn = "motrpac_XFER_RP",
+                       uid = Sys.getenv("motrpac_uid"),
+                       pwd = Sys.getenv("motrpac_pwd")) 
+
+# Bring in the development data combined in SAS
+dev_data <- motrpac %>%
+  sqlQuery('SELECT * FROM SASRampProtocol')
+```
+
+ 
+```{r, prep_table1}
+
+pids_w_site <- motrpac %>%
+  sqlQuery('SELECT * FROM v_participantsadults_live') %>%
+  mutate(site_orig = floor(siteID/10)*10,
+         site_orig = factor(site_orig, levels = siteID_key,
+                                       labels = c("A", "B", "C", "D", "E",
+                                                  "F", "G", "H", "I", "J", 
+                                                  "K", "L")
+                         )
+  ) %>%
+  select(pid, site_orig)
+
+#close ODBC connection
+odbcCloseAll()
+
+table1 <- left_join(dev_data, pids_w_site, by = "pid") %>%
+  mutate(sex2 = factor(sex2, 
+                       levels=c(1,0),
+                       labels=c("Female", "Male")),
+         chosenprotocol = factor(chosenprotocol,
+                                 levels = c(2510, 5015, 5020,
+                                            7520, 7525, 10025),
+                                 labels=c("25+10","50+15","50+20",
+                                          "75+20","75+25","100+25"))
+  ) %>%
+  set_variable_labels(
+    sex2="Sex",
+    age_psca="Age, years",
+    chosenprotocol = "Chosen protocol",
+    BSA = "Body surface area, m^2",
+    waist="Waist circumference, cm",
+    peaktorqavg_iske="Average peak torque, Nm",
+    grip="Grip strength, kg",
+    hr="Resting heart rate, bpm",
+    duration="Test duration, minutes",
+    inrange="Duration within 8-12 minutes",
+    site_orig = "Site",
+    class="Study group"
+)
+
+# Test for normality to report median (IQR) if variable is not normal
+continuous_vars <- c("age_psca", "BSA", "waist", "peaktorqavg_iske", 
+                     "grip", "hr", "duration")
+
+test_normality_p_val <- map_dfr(continuous_vars,
+                                ~ tibble(Variable = .x,
+                                         p.value = shapiro.test(na.omit(table1[[.x]]))$p.value)) %>%
+  mutate(non_normal = ifelse(p.value < 0.05, 1, 0)) 
+
+```
+
+```{r, table1}
+
+# Print table 1
+table1 %>% 
+  select(age_psca, sex2, chosenprotocol, BSA, 
+         waist, peaktorqavg_iske, grip, hr,
+         duration, inrange, site_orig, class) %>%
+  tbl_summary(by = class,
+              statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
+                               c("age_psca", "waist", "peaktorqavg_iske",
+                                 "grip", "duration")  ~ "{median}\n({p25}, {p75})"),
+              digits = list("BSA" ~ c(1,1),
+                            "hr" ~ c(0,0),
+                            c("waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
+                            c("age_psca", "grip") ~ c(0,0,0))) %>%
+    add_overall()  %>%
+  gtsummary_polish() %>%
+  flextable_autofit(width_max = 7, 
+                    prop_used_col_1 = .3) %>%
+  add_header_lines("Table 2 - Descriptive statistics of development data by study group.*") %>%
+  add_footer_lines("*HAEE=highly active endurance exercise; HARE=highly active resistance exercise; SED=sedentary.")
+
+```
+
+
+\newpage
+
+```{r, by_women}
+women <- filter(table1, sex2 == "Female")
+
+women %>% 
+  select(age_psca, sex2, chosenprotocol, BSA, 
+         waist, peaktorqavg_iske, grip, hr,
+         duration, inrange, site_orig, class) %>%
+  tbl_summary(by = class,
+              statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
+                               c("age_psca", "waist", "peaktorqavg_iske",
+                                 "grip", "duration")  ~ "{median}\n({p25}, {p75})"),
+              digits = list("BSA" ~ c(1,1),
+                            "hr" ~ c(0,0),
+                            c("waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
+                            c("age_psca", "grip") ~ c(0,0,0))) %>%
+    add_overall()  %>%
+  gtsummary_polish() %>%
+  flextable_autofit(width_max = 7, 
+                    prop_used_col_1 = .3) %>%
+  add_header_lines("Supplemental Digital Content 2 - Descriptive statistics of development data, women only.*") %>%
+  add_footer_lines("*HAEE=highly active endurance exercise; HARE=highly active resistance exercise; SED=sedentary.")
+
+```
+
+
+\newpage
+
+
+```{r, by_men}
+men <- filter(table1, sex2 == "Male")
+
+men %>% 
+  select(age_psca, sex2, chosenprotocol, BSA, 
+         waist, peaktorqavg_iske, grip, hr,
+         duration, inrange, site_orig, class) %>%
+  tbl_summary(by = class,
+              statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
+                               c("age_psca", "waist", "peaktorqavg_iske",
+                                 "grip", "duration")  ~ "{median}\n({p25}, {p75})"),
+              digits = list("BSA" ~ c(1,1),
+                            "hr" ~ c(0,0),
+                            c("waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
+                            c("age_psca", "grip") ~ c(0,0,0))) %>%
+    add_overall()  %>%
+  gtsummary_polish() %>%
+  flextable_autofit(width_max = 7, 
+                    prop_used_col_1 = .3) %>%
+  add_header_lines("Supplemental Digital Content 3 - Descriptive statistics of development data, men only.*") %>%
+  add_footer_lines("*HAEE=highly active endurance exercise; HARE=highly active resistance exercise; SED=sedentary.")
+
+```
+
+\newpage
+
+## Number in training dataset with watts at termination between 125 to 140
+```{r, n_watts_125_140}
+
+out_of_range_within_watts <- dev_data %>%
+  filter(wattend_cpet > 125 & wattend_cpet < 140 & inrange == 0 & class == "SED") %>%
+  summarize(n = n())
+
+out_of_range <- dev_data %>%
+  filter(inrange == 0 & class == "SED") %>%
+  summarize(n = n())
+```
+
+`r out_of_range_within_watts$n` SED participants had watts at termination between 125 and 140 and were out of range.
+
+`r out_of_range$n` SED participants were out of range.
+
+Of those out of range, `r (out_of_range_within_watts/out_of_range)*100`% were due to having watts at termination between 125 and 140. 
+
+
+\newpage
+
+## Mirrored Histogram
+
+```{r, hist}
+
+df_plot_ps <- dev_data %>%
+  tidyr::pivot_wider(names_from = inrange, 
+                     values_from = wattend_cpet, 
+                     names_prefix = "ct_p")
+
+
+ggplot(df_plot_ps) +
+  geom_histogram(bins = 50,   alpha = 0.5,
+                 aes(x = ct_p1), 
+                 fill = "cornflower blue") +
+  geom_histogram(bins = 50, alpha = 0.5,
+                 aes(x = ct_p0, 
+                     y = - stat(count)),
+                 fill = "orange") + 
+  scale_y_continuous("Count", label = abs) + 
+  scale_x_continuous("Watts at Termination") +
+  annotate(geom ="label", x= 300, y=15, label="In Range", color="cornflower blue") + 
+  annotate(geom ="label", x= 300, y=-15, label="Out of Range", color="orange") + 
+  facet_wrap(~class, ncol=3)
+
+ggsave(file.path(here(), "/reports/Figures/Supplemental_Fig_2.tif"),
+      device = "tiff", dpi = 600, width = 5.75, height = 3.75, units = "in")
+```
+
+
+
+
+
+

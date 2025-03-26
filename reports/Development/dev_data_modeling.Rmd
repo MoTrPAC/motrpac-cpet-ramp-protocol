@@ -1,0 +1,252 @@
+---
+title: "Modeling of Development Data"
+output: 
+  officedown::rdocx_document:
+    reference_docx: style_manuscript_times_new_roman.docx
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning= FALSE, 
+                      message = FALSE)
+```
+
+```{r}
+library(RODBC)
+library(boot)
+library(tidyverse)
+library(tidymodels)
+library(lmtest)
+library(randomForest)
+library(xgboost)
+
+# Figure options
+theme_set(theme_bw())
+theme_update(panel.grid = element_blank())
+```
+
+```{r, data}
+
+# Using frozen data from 09/13/2024 data transfer
+motrpac <- odbcConnect(dsn = "motrpac_XFER_RP",
+                       uid = Sys.getenv("motrpac_uid"),
+                       pwd = Sys.getenv("motrpac_pwd")) 
+
+# Bring in the development data combined in SAS
+dev_data <- motrpac %>%
+  sqlQuery('SELECT * FROM SASRampProtocol')
+
+#close ODBC connection
+odbcCloseAll()
+```
+
+## Scatterplots to pick functional forms
+
+```{r}
+
+ggplot(data = dev_data, aes(x = grip, y = wattend_cpet)) +
+  geom_point() + 
+  geom_smooth(color = 'black') +
+  xlab("Grip Strength, kg") + 
+  ylab("Watts at Termination")
+
+ggplot(data = dev_data, aes(x = peaktorqavg_iske, y = wattend_cpet)) +
+  geom_point() + 
+  geom_smooth(color = 'black') +
+  xlab("Isometric Knee Extension, Newton Meters") + 
+  ylab("Watts at Termination")
+
+ggplot(data = dev_data, aes(x = BSA, y = wattend_cpet)) +
+  geom_point() + 
+  geom_smooth(color = 'black') +
+  xlab(bquote("Body Surface Area, " ~m^2)) + 
+  ylab("Watts at Termination")
+
+ggplot(data = dev_data, aes(x = age_psca, y = wattend_cpet)) +
+  geom_point() + 
+  geom_smooth(color = 'black') +
+  xlab("Age, years") + 
+  ylab("Watts at Termination")
+
+ggplot(data = dev_data, aes(x = waist, y = wattend_cpet)) +
+  geom_point() + 
+  geom_smooth(color = 'black') +
+  xlab("Waist Circumference, cm") + 
+  ylab("Watts at Termination")
+```
+
+
+\newpage
+
+```{r, impute}
+dev_data_reduced <- dev_data %>%
+  select(-c("chosenprotocol", "inrange", "duration"))
+
+# impute missing data in peaktorqavg_iske and grip strength variables using
+# k-nearest neighbors
+imputer=recipe(wattend_cpet~., data=dev_data_reduced)%>%
+  step_rm(pid)%>%
+  step_string2factor(class)%>%
+  step_dummy(class)%>%
+  step_impute_knn(peaktorqavg_iske,grip)%>%
+  prep(training=dev_data_reduced)
+
+dev_data_i=juice(imputer)
+
+```
+
+
+## Linear Regression
+
+### Data for Table 4 - Coefficients from the final linear regression model to predict watts at conclusion of the cardiopulmonary exercise test.
+
+```{r}
+lm1=lm(wattend_cpet ~ BSA+ peaktorqavg_iske + sex2 +age_psca + class_HARE + class_SED + waist + grip + hr, data=dev_data_i)
+summary(lm1)
+
+
+plot(dev_data$wattend_cpet~(predict(lm1, dev_data_i)), 
+     main="Predicted vs Observed Watts with Linear Regression", 
+     xlab="Predicted Watts at Termination", 
+     ylab="Observed Watts at Termination"
+)
+
+to_calc_rsq <- dev_data_i %>%
+  mutate(predicted = predict(lm1, dev_data_i))
+  
+rsq(to_calc_rsq, wattend_cpet, predicted)
+
+lm_onlyAge=lm(wattend_cpet ~ age_psca , data=dev_data_i)
+
+lrtest(lm1, lm_onlyAge)
+```
+
+
+\newpage
+
+## Random Forest 
+
+```{r}
+ramp_rf <- dev_data_i %>% 
+  mutate_if(is.character, as.factor)
+
+rf <- randomForest(wattend_cpet ~ BSA+ peaktorqavg_iske +sex2 +age_psca + class_HARE+class_SED+waist +grip +hr,
+                   data = ramp_rf,  
+                   importance=TRUE)
+
+plot(dev_data_i$wattend_cpet~ (predict(rf, ramp_rf)), 
+     main="Predicted vs Observed Watts with Random Forest", 
+     xlab="Predicted Watts at Termination", 
+     ylab="Observed Watts at Termination"
+)
+
+```
+
+
+\newpage
+
+## Gradient Boosting 
+
+```{r}
+ramp_xg <- data.matrix(select(ramp_rf, - wattend_cpet))
+
+boost = xgboost(data = ramp_xg, 
+                label = ramp_rf$wattend_cpet, 
+                objective = "reg:squarederror", 
+                nrounds=10)
+
+plot(dev_data_i$wattend_cpet ~ (predict(boost, ramp_xg)), 
+     main="Predicted vs Observed Watts with Extreme Gradient Boosting", 
+     xlab="Predicted Watts at Termination", 
+     ylab="Observed Watts at Termination")
+
+```
+
+
+\newpage
+
+## Cross-Validation
+
+```{r}
+
+set.seed(865)
+folds <- sample(rep(1:10, 40) )
+dev_data_i$fold <- folds
+ramp_rf$fold <- folds
+
+
+MSElm=rep(NA, 10)
+MSErf=rep(NA, 10)
+MSExg=rep(NA, 10)
+
+MSElm_onlyAge = rep(NA, 10)
+
+RSQlm=rep(NA, 10)
+RSQrf=rep(NA, 10)
+RSQxg=rep(NA, 10)
+
+RSQlm_onlyAge = rep(NA, 10)
+
+
+for (i in 1:10){
+  ts=subset(dev_data_i,fold!=i)
+  vs=subset(dev_data_i, fold==i)
+  ts2=subset(ramp_rf,fold!=i)
+  vs2=subset(ramp_rf, fold==i)
+  tsxg=data.matrix(select(ts2, - wattend_cpet))
+  vsxg=data.matrix(select(vs2, - wattend_cpet))
+
+  # Calculate MSE
+  fitlm=lm(wattend_cpet ~ BSA+ peaktorqavg_iske +sex2 +age_psca + class_HARE+class_SED +waist+ grip+ hr, data=ts)
+  MSElm[i]=mean((vs$wattend_cpet-predict(fitlm, vs))^2)
+  
+  fitlm_onlyAge=lm(wattend_cpet ~ age_psca , data=ts)
+  MSElm_onlyAge[i]=mean((vs$wattend_cpet-predict(fitlm_onlyAge, vs))^2)
+  
+ fitrf <- randomForest(wattend_cpet ~ BSA+ peaktorqavg_iske +sex2 +age_psca + class_HARE+class_SED+waist +grip +hr, data=ts2,  importance=TRUE,)
+   MSErf[i]=mean((vs2$wattend_cpet-predict(fitrf, vs2))^2)
+  
+     fitxg = xgboost(data = tsxg, label = ts2$wattend_cpet, objective = "reg:squarederror", nrounds=10, verbose=0)
+     vsxgdf <- as.data.frame(vsxg)
+   MSExg[i]=mean((vs2$wattend_cpet-predict(fitxg, vsxg))^2)
+
+   # Calculate rsq
+ to_calc_rsqlm <- vs %>%
+    mutate(predlm = predict(fitlm, vs),
+           predlm_onlyAge = predict(fitlm_onlyAge, vs))
+
+ to_calc_rsqrf <- vs2 %>%          
+    mutate(predrf = predict(fitrf, vs2))
+ 
+ to_calc_rsqxg <- vs2
+ to_calc_rsqxg$predxg = predict(fitxg, vsxg)
+  
+ RSQlm[i] <- rsq(to_calc_rsqlm, wattend_cpet, predlm)$.estimate
+ RSQlm_onlyAge[i] <- rsq(to_calc_rsqlm, wattend_cpet, predlm_onlyAge)$.estimate
+
+ RSQrf[i] <- rsq(to_calc_rsqrf, wattend_cpet, predrf)$.estimate
+ RSQxg[i] <- rsq(to_calc_rsqxg, wattend_cpet, predxg)$.estimate
+
+ 
+}
+
+
+```
+
+### Data for Table 3 - Evaluations of model performances in development data. 10-fold cross-validation used to estimate mean squared error and R-squared.
+
+The MSE for the full linear model is `r round(mean(MSElm),digits = 2)`.
+
+The MSE for the age only linear model is `r round(mean(MSElm_onlyAge),digits = 2)`
+
+The MSE for the random forest model is `r round(mean(MSErf),digits = 2)`
+
+The MSE for the gradient boosted model is `r round(mean (MSExg),digits = 2)`
+
+
+The R-squared for the full linear model is `r round(mean(RSQlm),digits = 3)`
+
+The R-squared for the age only model is `r round(mean(RSQlm_onlyAge),digits = 3)`
+
+The R-squared for the random forest model is `r round(mean(RSQrf),digits = 3)`
+
+The R-squared for the gradient boosted model is `r round(mean(RSQxg),digits = 3)`

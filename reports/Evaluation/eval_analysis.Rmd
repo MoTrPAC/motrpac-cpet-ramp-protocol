@@ -1,0 +1,364 @@
+---
+title: "Analysis of Evaluation Data"
+output: 
+  officedown::rdocx_document:
+    reference_docx: style_manuscript_times_new_roman.docx
+---
+
+```{r setup, include=FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning=FALSE)
+
+library(RODBC)
+library(tidyverse)
+library(testthat)
+library(table1)
+library(kableExtra)
+library(here)
+library(gtsummary)
+library(labelled)
+library(flextable)
+
+source(file.path(here(), "key.R"))
+lapply(list.files(file.path(here(), "R"), full.names = TRUE), source)
+
+
+theme_set(theme_bw())
+theme_update(panel.grid = element_blank())
+
+```
+
+
+```{r, import_survey_data}
+
+# Google survey responses from sites that used the ramp protocol tool
+responses <- read.csv(file.path(here(), "data", "CPET Ramp Protocol Log (Responses) v1.csv"),
+                      col.names = c("timestamp", "email", "site", "pid", "RP_recommend_text",
+                                    "RP_chosen_text", "used_rec_text", "change_mind_text")) %>%
+  mutate(pid = as.character(pid),
+         changed_mind_yes = case_when(str_detect(tolower(change_mind_text), "yes\\b") ~ 1,
+                                      str_detect(tolower(change_mind_text), "\\bno\\b|\\bnope\\b") ~ 0,
+                                      #Manually checked responses recoding (pids located in key.R)                          
+                                      pid %in% pids_changed_mind_on_protocol ~ 1,
+                                      pid %in% pids_unchanged_mind_on_protocol ~ 0,
+                                      TRUE ~ NA),
+         changed_mind_yes = factor(changed_mind_yes, levels = c(0,1),
+                                   labels = c("No", "Yes"))
+  )
+```
+
+```{r, import_crf_data}
+
+# Transfer from 09/13/2024
+motrpac <- odbcConnect(dsn = "motrpac_XFER_RP",
+                       uid = Sys.getenv("motrpac_uid"),
+                       pwd = Sys.getenv("motrpac_pwd")) 
+
+# bring in data recorded on CPET to verify what was actually done
+cpet_scp <- motrpac %>%
+  sqlQuery(
+    'SELECT
+    "pid", "d_visit", "visitcode", "expctdrspns_cpet", 
+    "wattexer0_cpet", "wattexer1_cpet", "wattexer2_cpet",
+    "t_end_cpet", "wattend_cpet", "staffID", "siteID"
+    FROM v_cpet'
+  ) %>%
+  filter(visitcode == "ADU_SCP") %>%
+  mutate(pid = as.character(pid),
+         d_cpet = as.Date(d_visit),
+         chosen_starting_watts = wattexer0_cpet,
+         chosen_watt_increase = wattexer2_cpet - wattexer0_cpet,
+         calc_chosen_protocol = paste0(chosen_starting_watts, "+", chosen_watt_increase),
+         chosen_protocol = case_when(expctdrspns_cpet == 1 ~ "15+8",
+                                     expctdrspns_cpet == 2 ~ "25+10",
+                                     expctdrspns_cpet == 3 ~ "50+15",
+                                     expctdrspns_cpet == 4 ~ "50+20",
+                                     expctdrspns_cpet == 5 ~ "75+20",
+                                     expctdrspns_cpet == 6 ~ "75+25",
+                                     expctdrspns_cpet == 7 ~ "100+25"),
+         time_lubridate = ms(t_end_cpet),
+         time_min = as.numeric(str_sub(t_end_cpet, start = 1, end = 2)),
+         time_sec = as.numeric(str_sub(t_end_cpet, start = 4, end = 5)),
+         time = time_min + (time_sec/60),
+         calc_watts_term = chosen_starting_watts + (chosen_watt_increase*(time-2)),
+         in_range = ifelse(between(time, 8, 12), 1, 0),
+         siteID = ifelse(siteID %% 10 == 0, siteID, siteID - 2),
+         siteID = factor(siteID, levels = siteID_key,
+                         labels = c("A", "B", "C",
+                                    "D", "E",
+                                    "F", "G", "H",
+                                    "I", "J", "K", "L"))
+         )  
+
+
+```
+
+
+```{r, import_predictions}
+# Bring in Ramp Protocol prediction info
+predictions <- motrpac %>%
+  sqlQuery(
+    'SELECT * FROM RRampProtocol'
+  ) %>% 
+  rename(pred_final_watts = `predict(lm1, newdatai)`) %>%
+  mutate(pid = as.character(pid)) %>%
+  rowwise() %>%
+  # Calculate estimated duration of test to see what was would have displayed on the 
+  # prediction tool as a recommended protocol
+  mutate(estduration1=((pred_final_watts-15)/8)+2,
+         estduration2=((pred_final_watts-25)/10)+2,
+         estduration3=((pred_final_watts-50)/15)+2,
+         estduration4=((pred_final_watts-50)/20)+2,
+         estduration5=((pred_final_watts-75)/20)+2,
+         estduration6=((pred_final_watts-75)/25)+2,
+         estduration7=((pred_final_watts-100)/25)+2) %>%
+  ungroup() %>%
+  mutate(protocol1 = ifelse(between(estduration1,8,12), 1, 0),
+         protocol2 = ifelse(between(estduration2,8,12), 1, 0),
+         protocol3 = ifelse(between(estduration3,8,12), 1, 0),
+         protocol4 = ifelse(between(estduration4,8,12), 1, 0),
+         protocol5 = ifelse(between(estduration5,8,12), 1, 0),
+         protocol6 = ifelse(between(estduration6,8,12), 1, 0),
+         protocol7 = ifelse(between(estduration7,8,12), 1, 0),
+         
+         # How many recommendations were display for a participant
+         num_recs = rowSums(across(starts_with("protocol")))) 
+
+odbcClose(motrpac)
+
+```
+
+```{r, combine}
+# Merge all our data together by pid
+merged_enrollment <- inner_join(responses, cpet_scp, by = "pid") %>%
+  left_join(predictions, by = "pid") 
+
+# Use most recent entry if multiple surveys per pid entered
+unique <- merged_enrollment %>% 
+  arrange(pid, timestamp) %>%
+  group_by(pid) %>% 
+  slice(n()) %>%
+  ungroup()
+
+# Create some analysis variables
+analysis_data <- unique %>%
+  mutate(chose_rec = case_when(expctdrspns_cpet == 1 & protocol1 == 1 ~ 1,
+                                expctdrspns_cpet == 2 & protocol2 == 1 ~ 1,
+                                expctdrspns_cpet == 3 & protocol3 == 1 ~ 1,
+                                expctdrspns_cpet == 4 & protocol4 == 1 ~ 1,
+                                expctdrspns_cpet == 5 & protocol5 == 1 ~ 1,
+                                expctdrspns_cpet == 6 & protocol6 == 1 ~ 1,
+                                expctdrspns_cpet == 7 & protocol7 == 1 ~ 1,
+                                num_recs == 0 ~ 2, #No recommendations available to choose
+                                TRUE ~ 0),
+         chose_rec = factor(chose_rec,
+                            levels = c(1,0,2),
+                            labels = c("Recommendation Used",
+                                       "Recommendation not Used",
+                                       "No Recommendations Available")),
+         diff_in_watts = wattend_cpet-pred_final_watts,
+         se = (diff_in_watts)^2)
+
+desc_stat <- analysis_data %>%
+  mutate(sex2 = factor(sex2,
+                       levels=c(1,0),
+                       labels=c("Female", "Male")),
+         num_recs = factor(num_recs,
+                           levels = c(0, 1 , 2, 3)),
+         chosen_protocol = factor(chosen_protocol, 
+                                  levels = c("15+8","25+10","50+15",
+                                             "50+20","75+20","75+25",
+                                             "100+25"))) %>%
+  set_variable_labels(
+    sex2="Sex",
+    age_psca="Age, years",
+    chosen_protocol = "Chosen protocol",
+    BSA = "Body surface area, m^2",
+    waist="Waist circumference, cm",
+    peaktorqavg_iske="Average peak torque, Nm",
+    grip="Grip strength, kg",
+    hr="Resting heart rate, bpm",
+    time="Test duration, minutes",
+    in_range="Duration within 8-12 minutes",
+    siteID = "Site",
+    class="Study group",
+    se = "MSE",
+    wattend_cpet = "Observed watts at termination",
+    pred_final_watts = "Predicted watts at termination",
+    num_recs = "Number of protocols predicted to fall within 8-12 minutes",
+    changed_mind_yes = "Changed mind on protocol after using tool",
+    chose_rec = "Chose recommendation",
+    changed_mind_yes = "Changed mind on protocol after using tool"
+)
+
+# Test for normality to report median (IQR) if variable is not normal
+continuous_vars <- c("wattend_cpet", "se", "pred_final_watts")
+
+test_normality_p_val <- map_dfr(continuous_vars,
+                                ~ tibble(Variable = .x,
+                                         p.value = shapiro.test(na.omit(desc_stat[[.x]]))$p.value)) %>%
+  mutate(non_normal = ifelse(p.value < 0.05, 1, 0)) 
+# All non-normal, use median (IQR)
+
+```
+
+
+```{r}
+desc_stat %>% 
+  select(age_psca, sex2, chosen_protocol, BSA, waist, peaktorqavg_iske, grip, hr,
+         time, in_range, siteID, class) %>%
+  tbl_summary(by = class,
+              statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
+                               c("age_psca", "waist", "peaktorqavg_iske",
+                                 "grip", "time")  ~ "{median}\n({p25}, {p75})"),
+              digits = list("BSA" ~ c(1,1),
+                            "hr" ~ c(0,0),
+                            c("waist", "peaktorqavg_iske", "time") ~ c(1,1,1),
+                            c("age_psca", "grip") ~ c(0,0,0))) %>%
+    add_overall() %>%
+  gtsummary_polish() %>%
+  flextable_autofit(width_max = 7, 
+                    prop_used_col_1 = .3) %>%
+  add_header_lines("Table 5 - Descriptive statistics of evaluation data, by study population.*") %>%
+  add_footer_lines("*HAEE=highly active endurance exercise; HARE=highly active resistance exercise; SED=sedentary.")
+
+```
+
+\newpage
+
+```{r}
+
+desc_stat %>% 
+  select(age_psca, sex2, chosen_protocol, BSA, waist, peaktorqavg_iske, grip, hr,
+         time, in_range, siteID, class) %>%
+  tbl_summary(by = sex2,
+              statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
+                               c("age_psca", "waist", "peaktorqavg_iske",
+                                 "grip", "time")  ~ "{median}\n({p25}, {p75})"),
+              digits = list("BSA" ~ c(1,1),
+                            "hr" ~ c(0,0),
+                            c("waist", "peaktorqavg_iske", "time") ~ c(1,1,1),
+                            c("age_psca", "grip") ~ c(0,0,0))) %>%
+    add_overall() %>%
+  gtsummary_polish() %>%
+  flextable_autofit(width_max = 7, 
+                    prop_used_col_1 = .3) %>%
+  add_header_lines("Supplemental Digital Content 5 - Descriptive statistics of evaluation data, by sex.*") %>%
+  add_footer_lines("*HAEE=highly active endurance exercise; HARE=highly active resistance exercise; SED=sedentary.")
+
+```
+
+\newpage
+
+```{r}
+
+desc_stat %>% 
+  select(wattend_cpet, pred_final_watts, se, num_recs, time, in_range, siteID,
+          changed_mind_yes, chose_rec) %>%
+  tbl_summary(by = chose_rec,
+              statistic = list(all_continuous()  ~ "{median}\n({p25}, {p75})")) %>%
+    add_overall() %>%
+  gtsummary_polish() %>%
+  flextable_autofit(width_max = 7, 
+                    prop_used_col_1 = .2) %>%
+  add_header_lines("Table 6 - Results of cardiopulmonary exercise tests that utilized prediction tool.")
+
+```
+
+\newpage 
+
+
+```{r}
+
+# Merge all our data together by pid
+merged <- left_join(cpet_scp, predictions, by = "pid") 
+```
+
+
+# Results of the 200 cpets before deployment of tool, by study population
+```{r}
+# get most recent 200 data points before deployment of prediction tool
+pre_tool_200_cpets <- merged %>%
+  filter(d_cpet <= "2024-02-14") %>%
+  arrange(desc(d_cpet)) %>%
+  slice_head(n = 200)
+  
+
+# Create some analysis variables
+pre_tool_200_cpets <- pre_tool_200_cpets %>%
+  mutate(sex2 = factor(sex2,
+                       levels=c(1,0),
+                       labels=c("Female", "Male"))) %>%
+  set_variable_labels(
+    time = "Test duration, minutes",
+    in_range = "In-range"
+  )
+
+pre_tool_200_cpets  %>% 
+  select(time, in_range, class) %>%
+  tbl_summary(by = class) %>%
+    add_overall() %>%
+  gtsummary_polish() %>%
+  flextable_autofit(width_max = 7, 
+                    prop_used_col_1 = .4)
+```
+
+\newpage 
+
+# Results of the 200 CPETs before deployment of tool, by sex
+
+```{r}
+pre_tool_200_cpets  %>% 
+  select(time, in_range, sex2) %>%
+  tbl_summary(by = sex2) %>%
+    add_overall() %>%
+    gtsummary_polish() %>%
+    flextable_autofit(width_max = 7, 
+                      prop_used_col_1 = .4)
+
+```
+
+\newpage
+
+# All CPETs over time
+
+```{r, all_CPETs}
+over_time <- cpet_scp %>%
+  filter(!is.na(time)) %>%
+  arrange(d_cpet) %>%
+  mutate(cpet_order = row_number()) 
+  
+getMeans <- function(data, nsize) {
+  cpet_n <- seq(nsize,nrow(data), by = 1)
+  means <- rep(NA, nrow(data) - nsize + 1)
+  
+  num_iter <- nrow(data) - nsize + 1
+  for (i in 1:num_iter) {
+    mean_perc <- data %>%
+        filter(cpet_order %in% seq(i, i+nsize-1, by = 1)) %>%
+        summarise(in_range_perc = mean(in_range)*100) 
+  
+    means[i] <- mean_perc$in_range_perc
+  }
+  
+  cbind(cpet_n, means)
+}
+
+# Average over 200 Cpets
+rollingMeans <- as_tibble(getMeans(over_time, 200))
+
+rollingMeans %>%
+  ggplot(aes(x= cpet_n, y = means)) +
+  geom_line(linewidth = 0.4) + 
+  #xintercept is the cpet number of last pre-covid participant
+  geom_vline(xintercept = 286) + 
+  #xmin is the cpet number of when tool was deployed for use
+  annotate("rect", 
+          xmin = 1608, xmax = Inf, ymin = -Inf, ymax = Inf, 
+          alpha=0.2, fill="lightgreen") +  
+  xlab("CPET test number") +
+  ylab("Rolling average of tests in-range (8-12 minutes) (%)") 
+
+ggsave(file.path(here(), "reports", "Figures", "Fig_2.tif"),
+     device = "tiff", dpi = 600, width = 5.75, height = 4, units = "in")
+
+```
