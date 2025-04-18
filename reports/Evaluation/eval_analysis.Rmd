@@ -94,7 +94,7 @@ cpet_scp <- motrpac %>%
 
 
 ```{r, import_predictions}
-# Bring in Ramp Protocol prediction info
+# Bring in Ramp Protocol prediction info generated in predict_in_new_data.R
 predictions <- motrpac %>%
   sqlQuery(
     'SELECT * FROM RRampProtocol'
