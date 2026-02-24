@@ -5,7 +5,7 @@
 
 <!-- badges: start -->
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15241993.svg)](https://doi.org/10.5281/zenodo.15241993)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18763132.svg)](https://doi.org/10.5281/zenodo.18763132)
 <!-- badges: end -->
 
 The purpose of motrpac-cpet-ramp-protocol is to present code used in the
