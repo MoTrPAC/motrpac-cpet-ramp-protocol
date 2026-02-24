@@ -18,6 +18,8 @@ library(tidymodels)
 library(lmtest)
 library(randomForest)
 library(xgboost)
+library(ggplot2)
+library(here)
 
 # Figure options
 theme_set(theme_bw())
@@ -35,8 +37,18 @@ motrpac <- odbcConnect(dsn = "motrpac_XFER_RP",
 dev_data <- motrpac %>%
   sqlQuery('SELECT * FROM SASRampProtocol')
 
+# We also want BMI now too
+bl_bmi_data <- motrpac %>%
+  sqlQuery('SELECT pid, visitcode, calcbmi_hwwt
+           FROM v_HWWT') %>%
+  filter(visitcode == "ADU_SCP" & pid %in% dev_data$pid) %>%
+  select(-visitcode)
+
 #close ODBC connection
 odbcCloseAll()
+
+dev_data_w_BMI <- left_join(dev_data, bl_bmi_data, by = "pid")
+
 ```
 
 ## Scatterplots to pick functional forms
@@ -103,23 +115,67 @@ dev_data_i=juice(imputer)
 lm1=lm(wattend_cpet ~ BSA+ peaktorqavg_iske + sex2 +age_psca + class_HARE + class_SED + waist + grip + hr, data=dev_data_i)
 summary(lm1)
 
-
-plot(dev_data$wattend_cpet~(predict(lm1, dev_data_i)), 
-     main="Predicted vs Observed Watts with Linear Regression", 
-     xlab="Predicted Watts at Termination", 
-     ylab="Observed Watts at Termination"
-)
-
 to_calc_rsq <- dev_data_i %>%
   mutate(predicted = predict(lm1, dev_data_i))
   
 rsq(to_calc_rsq, wattend_cpet, predicted)
 
+# No peaktorque or grip strength model
+lm2=lm(wattend_cpet ~ BSA + sex2 +age_psca + class_HARE + class_SED + waist + hr, data=dev_data_i)
+
+# Age only model
 lm_onlyAge=lm(wattend_cpet ~ age_psca , data=dev_data_i)
 
 lrtest(lm1, lm_onlyAge)
+
+# Age, BMI, and sex model, restingHR & physical activity measurement
+# dev_data_i_w_BMI <- left_join(dev_data_i, 
+#                               select(dev_data_w_BMI, -peaktorqavg_iske, -grip)) %>%
+#   select(age_psca, sex2, BSA, wattend_cpet, hr, class_HARE, class_SED)
+# 
+# lm_reduced_vars=lm(wattend_cpet ~ age_psca + sex2 + calcbmi_hwwt + hr+ class_HARE + class_SED, data=dev_data_i_w_BMI)
+
+
 ```
 
+\newpage
+
+### Linear Regression Observed vs Predicted plot
+
+```{r}
+for_plot <- dev_data_i %>%
+  mutate(predicted = predict(lm1, dev_data_i))
+
+for_plot %>%
+  ggplot(aes(x = predicted, y = wattend_cpet)) +
+  geom_point(size = .75) +
+  geom_abline(slope = 1, intercept =0 ) +
+  ylab("Observed Watts at Termination") + 
+  xlab("Predicted Watts at Termination") +
+  ylim(c(50,475)) +
+  xlim(c(50,475))
+  
+
+ggsave(file.path(here(), "reports", "Figures", "Supplemental_Fig_3.tif"),
+     device = "tiff", dpi = 600, width = 5.75, height = 4, units = "in")
+```
+
+\newpage
+
+### Data for Supplemental - Coefficients from the linear regression model without peak torque and grip strength to predict watts at conclusion of the cardiopulmonary exercise test.
+
+```{r}
+lm2=lm(wattend_cpet ~ BSA + sex2 +age_psca + class_HARE + class_SED + waist + hr, data=dev_data_i)
+summary(lm2)
+
+
+plot(dev_data$wattend_cpet~(predict(lm2, dev_data_i)), 
+     main="Predicted vs Observed Watts with Linear Regression", 
+     xlab="Predicted Watts at Termination", 
+     ylab="Observed Watts at Termination"
+)
+
+```
 
 \newpage
 
@@ -171,6 +227,7 @@ plot(dev_data_i$wattend_cpet ~ (predict(boost, ramp_xg)),
 set.seed(865)
 folds <- sample(rep(1:10, 40) )
 dev_data_i$fold <- folds
+# dev_data_i_w_BMI$fold <- folds
 ramp_rf$fold <- folds
 
 
@@ -178,53 +235,95 @@ MSElm=rep(NA, 10)
 MSErf=rep(NA, 10)
 MSExg=rep(NA, 10)
 
+MSElm2=rep(NA, 10)
 MSElm_onlyAge = rep(NA, 10)
+MSElm_reducedVars = rep(NA, 10)
 
 RSQlm=rep(NA, 10)
 RSQrf=rep(NA, 10)
 RSQxg=rep(NA, 10)
 
+RSQlm2=rep(NA, 10)
 RSQlm_onlyAge = rep(NA, 10)
-
+RSQlm_reducedVars = rep(NA, 10)
 
 for (i in 1:10){
+  # Subsets for Linear modeling
   ts=subset(dev_data_i,fold!=i)
   vs=subset(dev_data_i, fold==i)
+  
+  # ts_reduced=subset(dev_data_i_w_BMI,fold!=i)
+  # vs_reduced=subset(dev_data_i_w_BMI, fold==i)
+  
+  
+  # Subsets for Random forest
   ts2=subset(ramp_rf,fold!=i)
   vs2=subset(ramp_rf, fold==i)
+  
+  # Subsets for Gradient boosting
   tsxg=data.matrix(select(ts2, - wattend_cpet))
   vsxg=data.matrix(select(vs2, - wattend_cpet))
 
   # Calculate MSE
-  fitlm=lm(wattend_cpet ~ BSA+ peaktorqavg_iske +sex2 +age_psca + class_HARE+class_SED +waist+ grip+ hr, data=ts)
+  # All predictors LM
+  fitlm=lm(wattend_cpet ~ BSA+ peaktorqavg_iske +sex2 +age_psca + class_HARE+
+             class_SED + waist + grip + hr, data=ts)
   MSElm[i]=mean((vs$wattend_cpet-predict(fitlm, vs))^2)
   
+  # Removing peaktorq and grip strength
+  fitlm2=lm(wattend_cpet ~ BSA +sex2 +age_psca + class_HARE+
+             class_SED + waist + hr, data=ts)
+  MSElm2[i]=mean((vs$wattend_cpet-predict(fitlm2, vs))^2)
+  
+  # Only age LM
   fitlm_onlyAge=lm(wattend_cpet ~ age_psca , data=ts)
   MSElm_onlyAge[i]=mean((vs$wattend_cpet-predict(fitlm_onlyAge, vs))^2)
   
- fitrf <- randomForest(wattend_cpet ~ BSA+ peaktorqavg_iske +sex2 +age_psca + class_HARE+class_SED+waist +grip +hr, data=ts2,  importance=TRUE,)
-   MSErf[i]=mean((vs2$wattend_cpet-predict(fitrf, vs2))^2)
+  # Reduced predictors (with BMI)
+  # fitlm_reducedVars=lm(wattend_cpet ~ age_psca + sex2 + calcbmi_hwwt + hr+ class_HARE + class_SED, 
+  #                      data=ts_reduced)
+  # MSElm_reducedVars[i] = mean((vs$wattend_cpet - 
+  #                                predict(fitlm_reducedVars, vs_reduced))^2)
   
-     fitxg = xgboost(data = tsxg, label = ts2$wattend_cpet, objective = "reg:squarederror", nrounds=10, verbose=0)
-     vsxgdf <- as.data.frame(vsxg)
-   MSExg[i]=mean((vs2$wattend_cpet-predict(fitxg, vsxg))^2)
+  # Random Forest
+  fitrf <- randomForest(wattend_cpet ~ BSA+ peaktorqavg_iske +sex2 +age_psca + 
+                      class_HARE+class_SED+waist +grip +hr, 
+                      data=ts2,  importance=TRUE,)
+  MSErf[i]=mean((vs2$wattend_cpet-predict(fitrf, vs2))^2)
+  
+  #Gradient boosting
+  fitxg = xgboost(data = tsxg, label = ts2$wattend_cpet, 
+                  objective = "reg:squarederror", nrounds=10, verbose=0)
+  vsxgdf <- as.data.frame(vsxg)
+  MSExg[i]=mean((vs2$wattend_cpet-predict(fitxg, vsxg))^2)
 
-   # Calculate rsq
- to_calc_rsqlm <- vs %>%
+  # Calculate r-squared
+  # Linear models
+  to_calc_rsqlm <- vs %>%
     mutate(predlm = predict(fitlm, vs),
+           predlm2 = predict(fitlm2, vs),
            predlm_onlyAge = predict(fitlm_onlyAge, vs))
 
- to_calc_rsqrf <- vs2 %>%          
+  # to_calc_rsqlm_reduced <- vs_reduced %>%
+  #   mutate(predlm_reducedVars = predict(fitlm_reducedVars, vs_reduced))
+
+  # Random forest
+  to_calc_rsqrf <- vs2 %>%          
     mutate(predrf = predict(fitrf, vs2))
  
- to_calc_rsqxg <- vs2
- to_calc_rsqxg$predxg = predict(fitxg, vsxg)
+  # Gradient boosting
+  to_calc_rsqxg <- vs2
+  to_calc_rsqxg$predxg = predict(fitxg, vsxg)
   
- RSQlm[i] <- rsq(to_calc_rsqlm, wattend_cpet, predlm)$.estimate
- RSQlm_onlyAge[i] <- rsq(to_calc_rsqlm, wattend_cpet, predlm_onlyAge)$.estimate
+  
+  RSQlm[i] <- rsq(to_calc_rsqlm, wattend_cpet, predlm)$.estimate
+  RSQlm2[i] <- rsq(to_calc_rsqlm, wattend_cpet, predlm2)$.estimate
+  RSQlm_onlyAge[i] <- rsq(to_calc_rsqlm, wattend_cpet, predlm_onlyAge)$.estimate
+  # RSQlm_reducedVars[i] <- rsq(to_calc_rsqlm_reduced, wattend_cpet, predlm_reducedVars)$.estimate
 
- RSQrf[i] <- rsq(to_calc_rsqrf, wattend_cpet, predrf)$.estimate
- RSQxg[i] <- rsq(to_calc_rsqxg, wattend_cpet, predxg)$.estimate
+  
+  RSQrf[i] <- rsq(to_calc_rsqrf, wattend_cpet, predrf)$.estimate
+  RSQxg[i] <- rsq(to_calc_rsqxg, wattend_cpet, predxg)$.estimate
 
  
 }
@@ -236,7 +335,11 @@ for (i in 1:10){
 
 The MSE for the full linear model is `r round(mean(MSElm),digits = 2)`.
 
+The MSE for the linear model without peak torque or grip strength is `r round(mean(MSElm2),digits = 2)`.
+
+
 The MSE for the age only linear model is `r round(mean(MSElm_onlyAge),digits = 2)`
+
 
 The MSE for the random forest model is `r round(mean(MSErf),digits = 2)`
 
@@ -246,6 +349,9 @@ The MSE for the gradient boosted model is `r round(mean (MSExg),digits = 2)`
 The R-squared for the full linear model is `r round(mean(RSQlm),digits = 3)`
 
 The R-squared for the age only model is `r round(mean(RSQlm_onlyAge),digits = 3)`
+
+The R-squared for the linear model without peak torque or grip strength is `r round(mean(RSQlm2),digits = 3)`.
+
 
 The R-squared for the random forest model is `r round(mean(RSQrf),digits = 3)`
 

@@ -89,7 +89,13 @@ cpet_scp <- motrpac %>%
                                     "I", "J", "K", "L"))
          )  
 
-
+  # We also want BMI now too
+  bl_bmi_data <- motrpac %>%
+    sqlQuery('SELECT pid, visitcode, calcbmi_hwwt
+             FROM v_HWWT') %>%
+    filter(visitcode == "ADU_SCP" & pid) %>%
+    mutate(pid = as.character(pid)) %>%
+    select(-visitcode)
 ```
 
 
@@ -130,13 +136,14 @@ odbcClose(motrpac)
 ```{r, combine}
 # Merge all our data together by pid
 merged_enrollment <- inner_join(responses, cpet_scp, by = "pid") %>%
-  left_join(predictions, by = "pid") 
+  left_join(predictions, by = "pid") %>%
+  left_join(bl_bmi_data, by = "pid")
 
 # Use most recent entry if multiple surveys per pid entered
 unique <- merged_enrollment %>% 
   arrange(pid, timestamp) %>%
   group_by(pid) %>% 
-  slice(n()) %>%
+  slice_tail() %>%
   ungroup()
 
 # Create some analysis variables
@@ -173,6 +180,7 @@ desc_stat <- analysis_data %>%
     age_psca="Age, years",
     chosen_protocol = "Chosen protocol",
     BSA = "Body surface area, m^2",
+    calcbmi_hwwt = "BMI, kg/m^2",
     waist="Waist circumference, cm",
     peaktorqavg_iske="Average peak torque, Nm",
     grip="Grip strength, kg",
@@ -204,15 +212,15 @@ test_normality_p_val <- map_dfr(continuous_vars,
 
 ```{r}
 desc_stat %>% 
-  select(age_psca, sex2, chosen_protocol, BSA, waist, peaktorqavg_iske, grip, hr,
-         time, in_range, siteID, class) %>%
+  select(age_psca, sex2, chosen_protocol, BSA, calcbmi_hwwt, waist, 
+         peaktorqavg_iske, grip, hr, time, in_range, siteID, class) %>%
   tbl_summary(by = class,
               statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
-                               c("age_psca", "waist", "peaktorqavg_iske",
+                               c("age_psca", "calcbmi_hwwt", "waist", "peaktorqavg_iske",
                                  "grip", "time")  ~ "{median}\n({p25}, {p75})"),
               digits = list("BSA" ~ c(1,1),
                             "hr" ~ c(0,0),
-                            c("waist", "peaktorqavg_iske", "time") ~ c(1,1,1),
+                            c("calcbmi_hwwt", "waist", "peaktorqavg_iske", "time") ~ c(1,1,1),
                             c("age_psca", "grip") ~ c(0,0,0))) %>%
     add_overall() %>%
   gtsummary_polish() %>%
@@ -223,20 +231,45 @@ desc_stat %>%
 
 ```
 
+```{r, plot_duration}
+
+protocol_colors <- c(
+  "50+20" = "#996633",
+  "75+20" = "#00B050",
+  "50+15" = "#DC50DC",
+  "75+25" = "#CC3232",
+  "100+25" = "#002060",
+  "25+10" = "#92D050",
+  "15+8" = "#9DE0F9"
+)
+
+
+desc_stat %>%
+  ggplot(aes(x = time, y = wattend_cpet, group = chosen_protocol, color = chosen_protocol)) +
+  geom_point() +
+  scale_fill_manual(values = protocol_colors) + 
+  scale_color_manual(values = protocol_colors) + 
+  annotate("rect", 
+        xmin = 8, xmax = 12, ymin = -Inf, ymax = Inf, 
+        alpha=0.2, fill="gray50")  
+
+```
+
+
 \newpage
 
 ```{r}
 
 desc_stat %>% 
-  select(age_psca, sex2, chosen_protocol, BSA, waist, peaktorqavg_iske, grip, hr,
-         time, in_range, siteID, class) %>%
+  select(age_psca, sex2, chosen_protocol, BSA, calcbmi_hwwt, waist, 
+         peaktorqavg_iske, grip, hr, time, in_range, siteID, class) %>%
   tbl_summary(by = sex2,
               statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
-                               c("age_psca", "waist", "peaktorqavg_iske",
+                               c("age_psca", "calcbmi_hwwt", "waist", "peaktorqavg_iske",
                                  "grip", "time")  ~ "{median}\n({p25}, {p75})"),
               digits = list("BSA" ~ c(1,1),
                             "hr" ~ c(0,0),
-                            c("waist", "peaktorqavg_iske", "time") ~ c(1,1,1),
+                            c("calcbmi_hwwt", "waist", "peaktorqavg_iske", "time") ~ c(1,1,1),
                             c("age_psca", "grip") ~ c(0,0,0))) %>%
     add_overall() %>%
   gtsummary_polish() %>%
@@ -349,8 +382,10 @@ rollingMeans <- as_tibble(getMeans(over_time, 200))
 rollingMeans %>%
   ggplot(aes(x= cpet_n, y = means)) +
   geom_line(linewidth = 0.4) + 
-  #xintercept is the cpet number of last pre-covid participant
-  geom_vline(xintercept = 286) + 
+  #xmax is the end of August 2021 - where our dev data came from
+  annotate("rect", 
+        xmin = -Inf, xmax = 496, ymin = -Inf, ymax = Inf, 
+        alpha=0.2, fill="#00B8EF") +
   #xmin is the cpet number of when tool was deployed for use
   annotate("rect", 
           xmin = 1608, xmax = Inf, ymin = -Inf, ymax = Inf, 
@@ -360,5 +395,24 @@ rollingMeans %>%
 
 ggsave(file.path(here(), "reports", "Figures", "Fig_2.tif"),
      device = "tiff", dpi = 600, width = 5.75, height = 4, units = "in")
+
+```
+\newpage
+
+# Test success rate of CPETs over time
+
+```{r}
+
+nums <- tribble(~time, ~success_n, ~total_n,
+                  "Model_dev", 248, 400,
+                  "pre-deployment", 148, 200, 
+                  "post-deployment", 48, 62)
+
+time1 <- filter(nums, time %in% c("Model_dev", "pre-deployment"))
+time2 <- filter(nums, time %in% c("pre-deployment", "post-deployment"))
+
+prop.test(x = time1$success_n, n = time1$total_n)
+
+prop.test(x = time2$success_n, n = time2$total_n)
 
 ```

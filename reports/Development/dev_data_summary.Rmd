@@ -34,6 +34,13 @@ motrpac <- odbcConnect(dsn = "motrpac_XFER_RP",
 # Bring in the development data combined in SAS
 dev_data <- motrpac %>%
   sqlQuery('SELECT * FROM SASRampProtocol')
+
+# We also want BMI now too
+bl_bmi_data <- motrpac %>%
+  sqlQuery('SELECT pid, visitcode, calcbmi_hwwt
+           FROM v_HWWT') %>%
+  filter(visitcode == "ADU_SCP" & pid %in% dev_data$pid) %>%
+  select(-visitcode)
 ```
 
  
@@ -54,6 +61,7 @@ pids_w_site <- motrpac %>%
 odbcCloseAll()
 
 table1 <- left_join(dev_data, pids_w_site, by = "pid") %>%
+  left_join(bl_bmi_data, by = "pid") %>%
   mutate(sex2 = factor(sex2, 
                        levels=c(1,0),
                        labels=c("Female", "Male")),
@@ -68,6 +76,7 @@ table1 <- left_join(dev_data, pids_w_site, by = "pid") %>%
     age_psca="Age, years",
     chosenprotocol = "Chosen protocol",
     BSA = "Body surface area, m^2",
+    calcbmi_hwwt = "BMI, kg/m^2",
     waist="Waist circumference, cm",
     peaktorqavg_iske="Average peak torque, Nm",
     grip="Grip strength, kg",
@@ -79,7 +88,7 @@ table1 <- left_join(dev_data, pids_w_site, by = "pid") %>%
 )
 
 # Test for normality to report median (IQR) if variable is not normal
-continuous_vars <- c("age_psca", "BSA", "waist", "peaktorqavg_iske", 
+continuous_vars <- c("age_psca", "BSA", "calcbmi_hwwt", "waist", "peaktorqavg_iske", 
                      "grip", "hr", "duration")
 
 test_normality_p_val <- map_dfr(continuous_vars,
@@ -93,16 +102,16 @@ test_normality_p_val <- map_dfr(continuous_vars,
 
 # Print table 1
 table1 %>% 
-  select(age_psca, sex2, chosenprotocol, BSA, 
+  select(age_psca, sex2, chosenprotocol, BSA, calcbmi_hwwt, 
          waist, peaktorqavg_iske, grip, hr,
          duration, inrange, site_orig, class) %>%
   tbl_summary(by = class,
               statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
-                               c("age_psca", "waist", "peaktorqavg_iske",
+                               c("age_psca", "calcbmi_hwwt", "waist", "peaktorqavg_iske",
                                  "grip", "duration")  ~ "{median}\n({p25}, {p75})"),
               digits = list("BSA" ~ c(1,1),
                             "hr" ~ c(0,0),
-                            c("waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
+                            c("calcbmi_hwwt", "waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
                             c("age_psca", "grip") ~ c(0,0,0))) %>%
     add_overall()  %>%
   gtsummary_polish() %>%
@@ -114,22 +123,46 @@ table1 %>%
 ```
 
 
+```{r, plot_duration}
+
+protocol_colors <- c(
+  "50+20" = "#996633",
+  "75+20" = "#00B050",
+  "50+15" = "#DC50DC",
+  "75+25" = "#CC3232",
+  "100+25" = "#002060",
+  "25+10" = "#92D050",
+  "15+8" = "#9DE0F9"
+)
+
+
+table1 %>%
+  ggplot(aes(x = duration, y = wattend_cpet, group = chosenprotocol, color = chosenprotocol)) +
+  geom_point() +
+  scale_fill_manual(values = protocol_colors) + 
+  scale_color_manual(values = protocol_colors) + 
+  annotate("rect", 
+        xmin = 8, xmax = 12, ymin = -Inf, ymax = Inf, 
+        alpha=0.2, fill="gray50")  
+
+```
+
 \newpage
 
 ```{r, by_women}
 women <- filter(table1, sex2 == "Female")
 
 women %>% 
-  select(age_psca, sex2, chosenprotocol, BSA, 
+  select(age_psca, sex2, chosenprotocol, BSA, calcbmi_hwwt, 
          waist, peaktorqavg_iske, grip, hr,
          duration, inrange, site_orig, class) %>%
   tbl_summary(by = class,
               statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
-                               c("age_psca", "waist", "peaktorqavg_iske",
+                               c("age_psca", "calcbmi_hwwt", "waist", "peaktorqavg_iske",
                                  "grip", "duration")  ~ "{median}\n({p25}, {p75})"),
               digits = list("BSA" ~ c(1,1),
                             "hr" ~ c(0,0),
-                            c("waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
+                            c("calcbmi_hwwt", "waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
                             c("age_psca", "grip") ~ c(0,0,0))) %>%
     add_overall()  %>%
   gtsummary_polish() %>%
@@ -148,16 +181,16 @@ women %>%
 men <- filter(table1, sex2 == "Male")
 
 men %>% 
-  select(age_psca, sex2, chosenprotocol, BSA, 
+  select(age_psca, sex2, chosenprotocol, BSA, calcbmi_hwwt, 
          waist, peaktorqavg_iske, grip, hr,
          duration, inrange, site_orig, class) %>%
   tbl_summary(by = class,
               statistic = list(c("BSA", "hr") ~ "{mean} ({sd})",
-                               c("age_psca", "waist", "peaktorqavg_iske",
+                               c("age_psca", "calcbmi_hwwt", "waist", "peaktorqavg_iske",
                                  "grip", "duration")  ~ "{median}\n({p25}, {p75})"),
               digits = list("BSA" ~ c(1,1),
                             "hr" ~ c(0,0),
-                            c("waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
+                            c("calcbmi_hwwt", "waist", "peaktorqavg_iske", "duration") ~ c(1,1,1),
                             c("age_psca", "grip") ~ c(0,0,0))) %>%
     add_overall()  %>%
   gtsummary_polish() %>%
